@@ -1,4 +1,4 @@
-﻿﻿const express = require('express');
+﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -27,12 +27,12 @@ app.use('/paynel', express.static(path.join(__dirname, 'paynel')));
 
 
 // CONFIGURAÇÃO SUPABASE (Credenciais do RICO INVESTIMENTO)
-const SUPABASE_URL = 'https://mgwxtbxgxozxicmipadr.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mgwxtbxgxozxicmipadr.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // CONFIGURACOES DE DEPOSITO
-const DEPOSITO_API_KEY = '32y3103KsiiaoL57dt38blJ1TWKxeDrUYucBeraKgI47hr2RbsJBOsJEtScy590203';
+const DEPOSITO_API_KEY = process.env.DEPOSITO_API_KEY || '32y3103KsiiaoL57dt38blJ1TWKxeDrUYucBeraKgI47hr2RbsJBOsJEtScy590203';
 const DEPOSITO_DESTINO_NUMERO = '926240472';
 const DEPOSITO_DESTINO_IBAN = '';
 const DEPOSITO_TAXA_KZ = 850;
@@ -41,8 +41,8 @@ const DEPOSITO_MAX_FILE_MB = 10;
 const DEPOSITO_TIMEOUT_MS = 25000;
 
 const SMS_API_URL = 'https://smsapi.sudomakes.com/api/enviar-sms';
-const SMS_API_KEY = 'hEc65zq9ipXOJeprFj4zMeW+OCiWAWohyoqSPeBqJX17ZD4Xgw8UGQiG5I5Dcs4G';
-const ADMIN_PASSWORD = '123';
+const SMS_API_KEY = process.env.SMS_API_KEY || 'hEc65zq9ipXOJeprFj4zMeW+OCiWAWohyoqSPeBqJX17ZD4Xgw8UGQiG5I5Dcs4G';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '123';
 
 function toNumberSafe(value, fallback = 0) {
     const n = Number(value);
@@ -769,10 +769,13 @@ app.post('/auth/login', async (req, res) => {
     const { telefone, senha } = req.body;
 
     try {
-        const usuarios = await buscarUsuariosPorTelefone(telefone);
+        const usuarios = await buscarUsuariosPorTelefone(telefone, 'id, nome_completo, telefone, senha, saldo_usd, bloqueado');
         const user = usuarios.find(u => String(u.senha) === String(senha).trim());
-        if (user) res.json({ success: true, usuario: user });
-        else res.status(401).json({ error: 'Dados incorretos' });
+        
+        if (!user) return res.status(401).json({ error: 'Dados incorretos' });
+        if (user.bloqueado) return res.status(403).json({ error: 'Usuário bloqueado pelo suporte. Contacte o suporte +55 926240472' });
+
+        res.json({ success: true, usuario: user });
     } catch (err) { res.status(500).json({ error: 'Erro no servidor' }); }
 });
 
