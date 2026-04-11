@@ -778,7 +778,11 @@ app.post('/auth/login', async (req, res) => {
         res.json({ success: true, usuario: user });
     } catch (err) {
         console.error("ERRO NO LOGIN:", err);
-        res.status(500).json({ error: 'Erro interno no servidor. Verifique se a coluna bloqueado existe no banco.' });
+        if (err.message && err.message.includes('column "bloqueado" does not exist')) {
+            res.status(500).json({ error: 'Erro crítico: A coluna "bloqueado" não existe no banco de dados.' });
+        } else {
+            res.status(500).json({ error: 'Erro interno no servidor. Verifique os logs.' });
+        }
     }
 });
 
@@ -878,7 +882,7 @@ app.post('/admin/alterar-nome', async (req, res) => {
     const { userId, novoNome, senhaAdmin } = req.body;
     const userIdNum = parseInt(userId);
 
-    if (senhaAdmin !== '123') {
+    if (senhaAdmin !== ADMIN_PASSWORD) {
         return res.status(401).json({ success: false, error: 'Senha de administrador incorreta.' });
     }
 
@@ -904,7 +908,7 @@ app.post('/admin/alterar-nome', async (req, res) => {
 app.post('/admin/alterar-senha', async (req, res) => {
     const { userId, novaSenha, senhaAdmin } = req.body;
 
-    if (senhaAdmin !== '123') {
+    if (senhaAdmin !== ADMIN_PASSWORD) {
         return res.status(401).json({ success: false, error: 'Senha de administrador incorreta.' });
     }
 
@@ -927,7 +931,7 @@ app.post('/admin/alterar-dados-bancarios', async (req, res) => {
     const { userId, unitel_money, iban, beneficiario_nome, senhaAdmin } = req.body;
     const userIdNum = parseInt(userId);
 
-    if (senhaAdmin !== '123') {
+    if (senhaAdmin !== ADMIN_PASSWORD) {
         return res.status(401).json({ success: false, error: 'Senha de administrador incorreta.' });
     }
 
@@ -982,7 +986,7 @@ app.post('/admin/limpar-dados-bancarios', async (req, res) => {
     const { userId, senhaAdmin } = req.body;
     const userIdNum = parseInt(userId);
 
-    if (senhaAdmin !== '123') {
+    if (senhaAdmin !== ADMIN_PASSWORD) {
         return res.status(401).json({ success: false, error: 'Senha de administrador incorreta.' });
     }
 
@@ -1006,7 +1010,7 @@ app.post('/admin/limpar-dados-bancarios', async (req, res) => {
 app.post('/admin/config/suporte', async (req, res) => {
     const { senhaAdmin, mensagem, ativo } = req.body;
 
-    if (senhaAdmin !== '123') {
+    if (senhaAdmin !== ADMIN_PASSWORD) {
         return res.status(401).json({ success: false, error: 'Senha de administrador incorreta.' });
     }
 
@@ -1108,7 +1112,7 @@ app.post('/admin/eliminar-usuario', async (req, res) => {
     const { userId, senha } = req.body;
     
     // Verificar a senha admin (123)
-    if (senha !== '123') {
+    if (senha !== ADMIN_PASSWORD) {
         return res.status(401).json({ success: false, error: 'Senha de administrador incorreta.' });
     }
     
