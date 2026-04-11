@@ -1,4 +1,4 @@
-﻿﻿﻿﻿const express = require('express');
+﻿﻿﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -776,7 +776,10 @@ app.post('/auth/login', async (req, res) => {
         if (user.bloqueado) return res.status(403).json({ error: 'Usuário bloqueado pelo suporte. Contacte o suporte +55 926240472' });
 
         res.json({ success: true, usuario: user });
-    } catch (err) { res.status(500).json({ error: 'Erro no servidor' }); }
+    } catch (err) {
+        console.error("ERRO NO LOGIN:", err);
+        res.status(500).json({ error: 'Erro interno no servidor. Verifique se a coluna bloqueado existe no banco.' });
+    }
 });
 
 app.get('/config/suporte', async (req, res) => {
