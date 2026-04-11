@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿const express = require('express');
+﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -19,13 +19,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(cors());
 app.use(express.json());
 
-// Servir os arquivos estáticos da pasta 'site'
-app.use(express.static(path.join(__dirname, 'site')));
-
-// Servir os arquivos estáticos da pasta 'paynel'
-app.use('/paynel', express.static(path.join(__dirname, 'paynel')));
-
-
 // CONFIGURAÇÃO SUPABASE (Credenciais do RICO INVESTIMENTO)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mgwxtbxgxozxicmipadr.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ';
@@ -35,7 +28,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const DEPOSITO_API_KEY = process.env.DEPOSITO_API_KEY || '32y3103KsiiaoL57dt38blJ1TWKxeDrUYucBeraKgI47hr2RbsJBOsJEtScy590203';
 const DEPOSITO_DESTINO_NUMERO = '926240472';
 const DEPOSITO_DESTINO_IBAN = '';
-const DEPOSITO_TAXA_KZ = 850;
+const DEPOSITO_TAXA_KZ = 1;
 const DEPOSITO_SUDO_URL = 'https://comprovativos.sudomakes.com/validar/';
 const DEPOSITO_MAX_FILE_MB = 10;
 const DEPOSITO_TIMEOUT_MS = 25000;
@@ -379,7 +372,7 @@ app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req
         return res.status(400).json({ success: false, error: 'Valor invalido no comprovativo.' });
     }
 
-    const valorUsd = Number((valorKz / DEPOSITO_TAXA_KZ).toFixed(2));
+    const valorUsd = valorKz;
 
     try {
         const { data: user, error: userErr } = await supabase
@@ -413,16 +406,16 @@ app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req
         }
 
         await supabase.from('depositos').insert({
-            user_id: userIdNum, transferencia_id: transferenciaId, valor_kz: valorKz, valor_usd: valorUsd,
+            user_id: userIdNum, transferencia_id: transferenciaId, valor_kz: valorKz, valor_usd: valorKz,
             destino_tipo: destino.tipo, destino_valor: destino.valor, detalhes: data
         });
 
-        const novoSaldo = arredondar2(toNumberSafe(user.saldo_usd) + valorUsd);
+        const novoSaldo = arredondar2(toNumberSafe(user.saldo_usd) + valorKz);
         await supabase.from('usuarios').update({ saldo_usd: novoSaldo }).eq('id', userIdNum);
 
         await supabase.from('transacoes').insert({
             remetente_id: userIdNum, remetente_nome: 'Deposito Automatico',
-            destinatario_id: userIdNum, destinatario_nome: 'Deposito Automatico', valor: valorUsd
+            destinatario_id: userIdNum, destinatario_nome: 'Deposito Automatico', valor: valorKz
         });
 
         notificarSaldoUsuario(user.telefone, {
@@ -434,7 +427,6 @@ app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req
         res.json({
             success: true,
             novoSaldo,
-            valorUsd,
             valorKz,
             transferenciaId,
         });
@@ -450,7 +442,7 @@ app.post('/transferir', async (req, res) => {
   const valorNum = parseFloat(valor);
 
   if (!Number.isFinite(valorNum) || valorNum < 1) {
-    return res.status(400).json({ error: 'O valor minimo de transferencia e 1.00 USD.' });
+    return res.status(400).json({ error: 'O valor minimo de transferencia e 1.00 KZ.' });
   }
 
   try {
@@ -477,8 +469,8 @@ app.post('/transferir', async (req, res) => {
 
     const remetenteNomeSeguro = normalizarTexto(remetente.nome_completo) || String(remetenteTelefone || '');
     const destinatarioNomeSeguro = normalizarTexto(destinatario.nome_completo) || String(destinoTelefone || '');
-    const msgDestinatario = `Recebeu um pagamento de ${valorNum.toFixed(2)} USD de ${remetenteNomeSeguro}.`;
-    const msgRemetente = `Fizeste uma transferencia de ${valorNum.toFixed(2)} USD para ${destinatarioNomeSeguro}.`;
+    const msgDestinatario = `Recebeu um pagamento de ${valorNum.toFixed(2)} KZ de ${remetenteNomeSeguro}.`;
+    const msgRemetente = `Fizeste uma transferencia de ${valorNum.toFixed(2)} KZ para ${destinatarioNomeSeguro}.`;
     enviarSMS(destinoTelefone, msgDestinatario);
     enviarSMS(remetenteTelefone, msgRemetente);
 
@@ -499,14 +491,14 @@ app.post('/levantamentos/solicitar', async (req, res) => {
     const { userId, valor, metodo, unitelTelefone, iban, beneficiarioNome } = req.body;
     const valorNumerico = parseFloat(valor);
     const metodoNormalizado = String(metodo || '').toLowerCase();
-    const VALOR_MINIMO_LEVANTAMENTO = 0.06;
+    const VALOR_MINIMO_LEVANTAMENTO = 50;
 
     if (!userId || !valorNumerico || valorNumerico <= 0 || !metodoNormalizado) {
         return res.status(400).json({ success: false, error: 'Dados de levantamento inválidos.' });
     }
 
     if (valorNumerico < VALOR_MINIMO_LEVANTAMENTO) {
-        return res.status(400).json({ success: false, error: 'O valor minimo para levantamento e 0.06 USD.' });
+        return res.status(400).json({ success: false, error: 'O valor minimo para levantamento e 50.00 KZ.' });
     }
 
     if (!['unitel_money', 'iban'].includes(metodoNormalizado)) { // Fix: Typo in 'método'
@@ -568,7 +560,7 @@ app.post('/levantamentos/solicitar', async (req, res) => {
 
         notificarSaldoUsuario(usuario.telefone, {
             novoSaldo,
-            mensagem: `Seu levantamento de $${valorNumerico.toFixed(2)} foi solicitado e está pendente.`
+            mensagem: `Seu levantamento de ${valorNumerico.toFixed(2)} KZ foi solicitado e está pendente.`
         });
 
         io.emit('atualizar-levantamentos', {
@@ -638,7 +630,7 @@ app.post('/admin/levantamentos/:id/aprovar', async (req, res) => {
         const saldoAtual = toNumberSafe(user?.saldo_usd);
         notificarSaldoUsuario(levantamento.user_telefone, {
             novoSaldo: saldoAtual,
-            mensagem: `Seu levantamento de $${parseFloat(levantamento.valor).toFixed(2)} foi pago.`
+            mensagem: `Seu levantamento de ${parseFloat(levantamento.valor).toFixed(2)} KZ foi pago.`
         });
 
         io.emit('atualizar-levantamentos', {
@@ -696,7 +688,7 @@ app.post('/admin/levantamentos/:id/rejeitar', async (req, res) => {
 
         notificarSaldoUsuario(levantamento.user_telefone, {
             novoSaldo: novoSaldo,
-            mensagem: `Seu levantamento de $${parseFloat(levantamento.valor).toFixed(2)} foi rejeitado. O valor voltou para sua conta.`
+            mensagem: `Seu levantamento de ${parseFloat(levantamento.valor).toFixed(2)} KZ foi rejeitado. O valor voltou para sua conta.`
         });
 
         io.emit('atualizar-levantamentos', {
@@ -755,7 +747,7 @@ app.post('/auth/cadastro', async (req, res) => {
             nome_completo: normalizarTexto(nome),
             telefone: assinaturaTelefone(telefone),
             senha: String(senha).trim(),
-            saldo_usd: 0.06
+            saldo_usd: 50.00
         }).select().single();
 
         if (error) throw error;
@@ -1056,7 +1048,7 @@ app.post('/admin/ajustar-saldo', async (req, res) => {
 
         notificarSaldoUsuario(user.telefone, { 
             novoSaldo,
-            mensagem: `Administrador ${operacao === 'soma' ? 'adicionou' : 'removeu'} $${valorNum} na sua conta.`
+            mensagem: `Administrador ${operacao === 'soma' ? 'adicionou' : 'removeu'} ${valorNum} KZ na sua conta.`
         });
 
         res.json({ success: true, novoSaldo });
@@ -1078,7 +1070,7 @@ app.post('/admin/bonus-global', async (req, res) => {
             
             notificarSaldoUsuario(u.telefone, {
                 novoSaldo,
-                mensagem: `🎁 Você recebeu um bônus de $${valorNum}!`
+                mensagem: `🎁 Você recebeu um bônus de ${valorNum} KZ!`
             });
         }
 
@@ -1333,7 +1325,7 @@ app.post('/resgatar-investimento', async (req, res) => {
     });
     await supabase.from('investimentos').delete().eq('id', investmentId);
 
-    notificarSaldoUsuario(user.telefone, { novoSaldo, mensagem: `Investimento resgatado: $${parseFloat(inv.valor_retorno_usd).toFixed(2)} creditado.` });
+    notificarSaldoUsuario(user.telefone, { novoSaldo, mensagem: `Investimento resgatado: ${parseFloat(inv.valor_retorno_usd).toFixed(2)} KZ creditado.` });
     io.emit('atualizar-investimentos', { userId: Number(userId), investmentId: Number(investmentId), acao: 'resgatado' });
     
     res.json({ success: true, novoSaldo, valorRecebido: inv.valor_retorno_usd });
@@ -1365,7 +1357,7 @@ app.post('/admin/investimentos/:id/cancelar', async (req, res) => {
     });
     await supabase.from('investimentos').delete().eq('id', investimentoId);
 
-    notificarSaldoUsuario(inv.usuarios.telefone, { novoSaldo, mensagem: `Investimento cancelado pelo administrador. $${valorDevolvido.toFixed(2)} devolvido.` });
+    notificarSaldoUsuario(inv.usuarios.telefone, { novoSaldo, mensagem: `Investimento cancelado pelo administrador. ${valorDevolvido.toFixed(2)} KZ devolvido.` });
     io.emit('atualizar-investimentos', { userId: Number(inv.user_id), investmentId, acao: 'cancelado_admin' });
 
     res.json({ success: true, userId: Number(inv.user_id), novoSaldo, valorDevolvido });
