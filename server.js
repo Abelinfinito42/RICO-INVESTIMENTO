@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿const express = require('express');
+﻿﻿﻿﻿﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -18,6 +18,9 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(cors());
 app.use(express.json());
+
+// Servir arquivos estáticos da pasta 'site'
+app.use(express.static(path.join(__dirname, 'site')));
 
 // CONFIGURAÇÃO SUPABASE (Credenciais do RICO INVESTIMENTO)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mgwxtbxgxozxicmipadr.supabase.co';
@@ -247,7 +250,7 @@ function extrairTransferenciaId(data, respostaTexto) {
     if (id) return String(id);
 
     if (respostaTexto) {
-        const match = respostaTexto.match(/(ID|REF|TRANSACAO)[^0-9]*([0-9]{6,})/i);
+        const match = respostaTexto.match(/(ID|REF|TRANSACAO|TRANSAC)[^0-9]*([0-9]{6,})/i);
         if (match && match[2]) {
             return String(match[2]);
         }
@@ -275,31 +278,46 @@ function extrairValorComprovativo(data, respostaTexto) {
 }
 
 function extrairDataComprovativo(data, respostaTexto) {
-    const dataRaw = obterValorChave(data, [
-        'DATA', 'DATE', 'DATA_TRANSACAO', 'DATA_EMISSAO', 'DATA_VALOR', 'DATA_OPERACAO'
-    ]);
-    
-    let dataTexto = String(dataRaw || '');
+    const chavesData = ['DATA', 'DATE', 'DATA_TRANSACAO', 'DATA_EMISSAO', 'DATA_VALOR', 'DATA_OPERACAO', 'DATA_HORA', 'DATA - HORA'];
+    let dataTexto = String(obterValorChave(data, chavesData) || '');
 
-    if (!dataTexto && respostaTexto) {
-        const match = respostaTexto.match(/(\d{2}[-/.]\d{2}[-/.]\d{4})/);
-        if (match) dataTexto = match[1];
+    // Unificamos o texto para busca (JSON + Texto Bruto)
+    const textoParaBusca = (dataTexto + " " + (respostaTexto || ""));
+
+    // 1. Procura Formato ISO: 2026-04-12 (Padrão Multicaixa Express)
+    const matchISO = textoParaBusca.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (matchISO) {
+        const ano = parseInt(matchISO[1]);
+        const mes = parseInt(matchISO[2]) - 1;
+        const dia = parseInt(matchISO[3]);
+        return new Date(ano, mes, dia);
     }
 
-    if (!dataTexto) return null;
-
-    // Tenta converter formatos comuns (DD-MM-YYYY ou YYYY-MM-DD)
-    const partes = dataTexto.split(/[-/.]/);
-    if (partes.length === 3) {
-        if (partes[0].length === 4) { // YYYY-MM-DD
-            return new Date(partes[0], partes[1] - 1, partes[2]);
-        } else { // DD-MM-YYYY
-            return new Date(partes[2], partes[1] - 1, partes[0]);
-        }
+    // 2. Procura Formato PT: 12/04/2026
+    const matchLong = textoParaBusca.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+    if (matchLong) {
+        const dia = parseInt(matchLong[1]);
+        const mes = parseInt(matchLong[2]) - 1;
+        const ano = parseInt(matchLong[3]);
+        return new Date(ano, mes, dia);
     }
-    
-    const parsed = new Date(dataTexto);
-    return isNaN(parsed.getTime()) ? null : parsed;
+
+    // 3. Procura Formato Curto: 12/04/26
+    const matchShort = textoParaBusca.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b/);
+    if (matchShort) {
+        const dia = parseInt(matchShort[1]);
+        const mes = parseInt(matchShort[2]) - 1;
+        let ano = parseInt(matchShort[3]);
+        ano = ano < 50 ? 2000 + ano : 1900 + ano;
+        return new Date(ano, mes, dia);
+    }
+
+    if (dataTexto && dataTexto.length > 5) {
+        const d = new Date(dataTexto);
+        if (!isNaN(d.getTime())) return d;
+    }
+
+    return null;
 }
 
 function isDataHojeOuFuturo(dataComprovativo) {
