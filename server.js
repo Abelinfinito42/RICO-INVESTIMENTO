@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿const express = require('express');
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -509,8 +509,8 @@ app.post('/transferir', async (req, res) => {
   const { remetenteTelefone, destinoTelefone, valor } = req.body;
   const valorNum = parseFloat(valor);
 
-  if (!Number.isFinite(valorNum) || valorNum < 1) {
-    return res.status(400).json({ error: 'O valor minimo de transferencia e 1.00 KZ.' });
+  if (!Number.isFinite(valorNum) || valorNum < 100) {
+    return res.status(400).json({ error: 'O valor minimo de transferencia e 100.00 KZ.' });
   }
 
   try {
