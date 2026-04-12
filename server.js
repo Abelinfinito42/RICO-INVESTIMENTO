@@ -1,4 +1,4 @@
-﻿﻿﻿﻿const express = require('express');
+﻿﻿﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -274,6 +274,47 @@ function extrairValorComprovativo(data, respostaTexto) {
     return numero;
 }
 
+function extrairDataComprovativo(data, respostaTexto) {
+    const dataRaw = obterValorChave(data, [
+        'DATA', 'DATE', 'DATA_TRANSACAO', 'DATA_EMISSAO', 'DATA_VALOR', 'DATA_OPERACAO'
+    ]);
+    
+    let dataTexto = String(dataRaw || '');
+
+    if (!dataTexto && respostaTexto) {
+        const match = respostaTexto.match(/(\d{2}[-/.]\d{2}[-/.]\d{4})/);
+        if (match) dataTexto = match[1];
+    }
+
+    if (!dataTexto) return null;
+
+    // Tenta converter formatos comuns (DD-MM-YYYY ou YYYY-MM-DD)
+    const partes = dataTexto.split(/[-/.]/);
+    if (partes.length === 3) {
+        if (partes[0].length === 4) { // YYYY-MM-DD
+            return new Date(partes[0], partes[1] - 1, partes[2]);
+        } else { // DD-MM-YYYY
+            return new Date(partes[2], partes[1] - 1, partes[0]);
+        }
+    }
+    
+    const parsed = new Date(dataTexto);
+    return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isDataHojeOuFuturo(dataComprovativo) {
+    if (!dataComprovativo) return false;
+
+    // Data atual em Angola
+    const hoje = new Date(new Date().toLocaleString("en-US", {timeZone: "Africa/Luanda"}));
+    hoje.setHours(0, 0, 0, 0);
+
+    const dataComp = new Date(dataComprovativo);
+    dataComp.setHours(0, 0, 0, 0);
+
+    return dataComp.getTime() >= hoje.getTime();
+}
+
 function validarDestinoComprovativo(respostaTexto) {
     if (!respostaTexto) return { ok: false, tipo: null, valor: null };
     const textoBruto = String(respostaTexto);
@@ -370,6 +411,15 @@ app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req
     const valorKz = extrairValorComprovativo(data, respostaTexto);
     if (!Number.isFinite(valorKz) || valorKz <= 0) {
         return res.status(400).json({ success: false, error: 'Valor invalido no comprovativo.' });
+    }
+
+    const dataTransacao = extrairDataComprovativo(data, respostaTexto);
+    if (!dataTransacao) {
+        return res.status(400).json({ success: false, error: 'Nao foi possivel identificar a data da transferencia.' });
+    }
+
+    if (!isDataHojeOuFuturo(dataTransacao)) {
+        return res.status(400).json({ success: false, error: 'Comprovativo rejeitado: A transferencia deve ser do dia de hoje.' });
     }
 
     const valorUsd = valorKz;
