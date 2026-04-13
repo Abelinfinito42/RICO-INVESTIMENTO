@@ -101,9 +101,6 @@ const depositoUpload = multer({
 // MAPA PARA GUARDAR USUÁRIOS ONLINE
 const usuariosOnline = new Map(); // Usado para gerenciar sockets de usuários online
 
-// Trava de segurança para evitar operações simultâneas (Race Condition)
-const operacoesEmAndamento = new Set();
-
 io.on('connection', (socket) => {
     socket.on('registrar-online', (telefone) => {
         usuariosOnline.set(String(telefone), socket.id);
@@ -520,11 +517,6 @@ app.post('/transferir', async (req, res) => {
     const remetente = await buscarUsuarioPorTelefone(remetenteTelefone, 'id, nome_completo, telefone, saldo_usd');
     if (!remetente) throw new Error('Remetente não encontrado');
 
-    if (operacoesEmAndamento.has(remetente.id)) {
-        return res.status(429).json({ error: 'Operação em andamento. Aguarde.' });
-    }
-    operacoesEmAndamento.add(remetente.id);
-
     const destinatario = await buscarUsuarioPorTelefone(destinoTelefone, 'id, nome_completo, telefone, saldo_usd');
     if (!destinatario) throw new Error('Destinatário não encontrado');
 
@@ -558,10 +550,6 @@ app.post('/transferir', async (req, res) => {
     res.json({ success: true, novoSaldo: novoSaldoRemetente });
   } catch (e) {
     res.status(400).json({ error: e.message });
-  } finally {
-    // Liberar a trava se o remetente foi encontrado
-    // Nota: remetente pode não existir se a busca falhar, por isso o check
-    buscarUsuarioPorTelefone(remetenteTelefone, 'id').then(u => u && operacoesEmAndamento.delete(u.id));
   }
 });
 
@@ -585,11 +573,6 @@ app.post('/levantamentos/solicitar', async (req, res) => {
         return res.status(400).json({ success: false, error: 'Método de levantamento inválido.' });
     }
 
-    // Verifica se já existe uma operação para este usuário
-    if (operacoesEmAndamento.has(userId)) {
-        return res.status(429).json({ success: false, error: 'Já existe uma solicitação em processamento. Aguarde.' });
-    }
-
     let unitelNormalizado = null; // Declare variables here
     let ibanNormalizado = null;
     let beneficiarioNormalizado = null;
@@ -605,9 +588,6 @@ app.post('/levantamentos/solicitar', async (req, res) => {
     }
 
     try {
-        // Ativa a trava para o usuário
-        operacoesEmAndamento.add(userId);
-
         const { data: usuario, error: userErr } = await supabase.from('usuarios').select('*').eq('id', userId).single();
         if (userErr || !usuario) throw new Error('Usuário não encontrado.');
 
@@ -660,9 +640,6 @@ app.post('/levantamentos/solicitar', async (req, res) => {
         res.json({ success: true, novoSaldo, levantamento });
     } catch (e) {
         res.status(400).json({ success: false, error: e.message });
-    } finally {
-        // Remove a trava após a conclusão (sucesso ou erro)
-        operacoesEmAndamento.delete(userId);
     }
 });
 
@@ -866,6 +843,36 @@ app.post('/auth/login', async (req, res) => {
         } else {
             res.status(500).json({ error: 'Erro interno no servidor. Verifique os logs.' });
         }
+    }
+});
+
+app.post('/auth/alterar-senha', async (req, res) => {
+    const { userId, senhaAtual, novaSenha } = req.body;
+
+    if (!userId || !senhaAtual || !novaSenha) {
+        return res.status(400).json({ success: false, error: 'Todos os campos são obrigatórios.' });
+    }
+
+    try {
+        // Busca a senha atual do usuário no banco
+        const { data: user, error: fetchErr } = await supabase
+            .from('usuarios')
+            .select('id, senha')
+            .eq('id', userId)
+            .single();
+
+        if (fetchErr || !user) return res.status(404).json({ success: false, error: 'Usuário não encontrado.' });
+
+        // Verifica se a senha atual digitada bate com a do banco
+        if (String(user.senha) !== String(senhaAtual).trim()) {
+            return res.status(401).json({ success: false, error: 'A senha atual está incorreta.' });
+        }
+
+        // Atualiza para a nova senha
+        await supabase.from('usuarios').update({ senha: String(novaSenha).trim() }).eq('id', userId);
+        res.json({ success: true, mensagem: 'Senha alterada com sucesso!' });
+    } catch (e) {
+        res.status(500).json({ success: false, error: 'Erro interno ao alterar senha.' });
     }
 });
 
