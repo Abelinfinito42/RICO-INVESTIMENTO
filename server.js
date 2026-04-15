@@ -591,40 +591,22 @@ app.post('/levantamentos/solicitar', async (req, res) => {
         const { data: usuario, error: userErr } = await supabase.from('usuarios').select('*').eq('id', userId).single();
         if (userErr || !usuario) throw new Error('Usuário não encontrado.');
 
-        if (toNumberSafe(usuario.saldo_usd) < valorNumerico) {
-            throw new Error('Saldo insuficiente para solicitar levantamento.');
-        }
+        // Chamada da Função RPC para processar o saque de forma atômica
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('solicitar_saque_v2', {
+            p_user_id: userId,
+            p_valor: valorNumerico,
+            p_metodo: metodoNormalizado,
+            p_unitel: unitelNormalizado,
+            p_iban: ibanNormalizado,
+            p_beneficiario: beneficiarioNormalizado,
+            p_user_nome: usuario.nome_completo,
+            p_user_telefone: usuario.telefone
+        });
 
-        const novoSaldo = arredondar2(toNumberSafe(usuario.saldo_usd) - valorNumerico);
-        const updateData = { saldo_usd: novoSaldo };
+        if (rpcErr) throw rpcErr;
+        if (!rpcData.success) throw new Error(rpcData.error);
 
-        if (metodoNormalizado === 'unitel_money') updateData.unitel_money = unitelNormalizado;
-        if (metodoNormalizado === 'iban') {
-            updateData.iban = ibanNormalizado;
-            updateData.beneficiario_nome = beneficiarioNormalizado;
-        }
-
-        const todosUsuariosResp = await supabase.from('usuarios').select('id,unitel_money,iban');
-        if (todosUsuariosResp.error) throw todosUsuariosResp.error;
-        const todosUsuarios = Array.isArray(todosUsuariosResp.data) ? todosUsuariosResp.data : [];
-
-        if (metodoNormalizado === 'unitel_money' && todosUsuarios.some((u) => Number(u.id) !== Number(userId) && assinaturaTelefone(u.unitel_money) === unitelNormalizado)) {
-            throw new Error('Numero Unitel Money já cadastrado em outra conta.');
-        }
-        if (metodoNormalizado === 'iban' && todosUsuarios.some((u) => Number(u.id) !== Number(userId) && normalizarDigitos(u.iban) === ibanNormalizado)) {
-            throw new Error('IBAN já cadastrado em outra conta.');
-        }
-
-        await supabase.from('usuarios').update(updateData).eq('id', userId);
-        const { data: levantamento, error: levErr } = await supabase.from('levantamentos').insert({
-            user_id: userId, user_nome: usuario.nome_completo, user_telefone: usuario.telefone,
-            metodo: metodoNormalizado, valor: valorNumerico, status: 'pendente',
-            unitel_telefone: metodoNormalizado === 'unitel_money' ? String(unitelTelefone) : null,
-            iban: metodoNormalizado === 'iban' ? String(iban) : null,
-            beneficiario_nome: metodoNormalizado === 'iban' ? String(beneficiarioNome).trim() : null
-        }).select().single();
-
-        if (levErr) throw levErr;
+        const novoSaldo = rpcData.novoSaldo;
 
         notificarSaldoUsuario(usuario.telefone, {
             novoSaldo,
@@ -633,11 +615,11 @@ app.post('/levantamentos/solicitar', async (req, res) => {
 
         io.emit('atualizar-levantamentos', {
             userId: Number(userId),
-            levantamentoId: levantamento.id,
+            levantamentoId: rpcData.levantamentoId,
             status: 'pendente'
         });
 
-        res.json({ success: true, novoSaldo, levantamento });
+        res.json({ success: true, novoSaldo });
     } catch (e) {
         res.status(400).json({ success: false, error: e.message });
     }
