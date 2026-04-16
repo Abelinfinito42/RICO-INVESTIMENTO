@@ -185,12 +185,14 @@ function tipoTransacao(tx, userId) {
     const destinatarioNome = String(tx.destinatario_nome || '').toLowerCase();
     const valor = toNumberSafe(tx.valor);
 
-    if (remetenteNome.includes('deposito')) return 'deposito';
+    // Prioridade para identificação de sistema e suporte
+    if (remetenteNome.includes('deposito') || remetenteNome.includes('suporte')) return 'deposito';
     if (remetenteNome.includes('ganho do investimento')) return 'ganho';
     if (remetenteNome.includes('cancelamento de investimento')) return 'cancelamento_investimento';
-    if (remetenteNome.includes('bônus de convite')) return 'ganho';
-    if (destinatarioNome.includes('investimento') || remetenteNome === 'sistema') return 'investimento';
+    if (remetenteNome.includes('bônus')) return 'bonus';
+    if (destinatarioNome.includes('investimento') || remetenteNome.includes('investimento')) return 'investimento';
 
+    // Identificação de transferências P2P
     if (Number(tx.remetente_id) === Number(userId)) return 'enviado';
     if (Number(tx.destinatario_id) === Number(userId)) return 'recebido';
     return valor >= 0 ? 'recebido' : 'enviado';
@@ -1181,9 +1183,14 @@ app.post('/admin/ajustar-saldo', async (req, res) => {
         const { error: updateErr } = await supabase.from('usuarios').update({ saldo_usd: novoSaldo }).eq('id', userId);
         if (updateErr) throw updateErr;
 
+        // Define um nome claro para o histórico dependendo da operação
+        const nomeOperacao = operacao === 'soma' ? 'Depósito pelo Suporte' : 'Ajuste de Saldo (Débito)';
+
         await supabase.from('transacoes').insert({
-            remetente_id: userId, remetente_nome: 'Sistema (Ajuste)',
-            destinatario_id: userId, destinatario_nome: 'Sistema (Ajuste)',
+            remetente_id: null, // Sistema não tem ID de usuário
+            remetente_nome: nomeOperacao,
+            destinatario_id: userId, 
+            destinatario_nome: user.nome_completo,
             valor: operacao === 'soma' ? valorNum : -valorNum
         });
 
@@ -1434,7 +1441,11 @@ app.post('/investir', async (req, res) => {
     });
 
     await supabase.from('transacoes').insert({
-        remetente_id: userId, remetente_nome: 'Sistema', destinatario_id: userId, destinatario_nome: 'Investimento', valor: -valor
+        remetente_id: userId, 
+        remetente_nome: 'Investimento', 
+        destinatario_id: null, 
+        destinatario_nome: 'Aplicação de Capital', 
+        valor: -valor
     });
 
     // LÓGICA DE BÔNUS DE CONVITE (10%)
