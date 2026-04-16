@@ -958,10 +958,44 @@ app.get('/referrals/stats/:userId', async (req, res) => {
             .from('transacoes')
             .select('valor')
             .eq('destinatario_id', uid)
-            .ilike('remetente_nome', '%Bônus de Convite%');
+            .ilike('remetente_nome', '%Bônus de Convite%')
+            .eq('vinculado', false);
 
         const totalBonus = (bonusData || []).reduce((sum, tx) => sum + toNumberSafe(tx.valor), 0);
         res.json({ totalInvited: count || 0, totalBonus: arredondar2(totalBonus) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// NOVA ROTA PARA VINCULAR BÔNUS AO SALDO
+app.post('/referrals/vincular', async (req, res) => {
+    const { userId } = req.body;
+    try {
+        // 1. Buscar bônus não vinculados
+        const { data: bonusPendentes } = await supabase
+            .from('transacoes')
+            .select('id, valor')
+            .eq('destinatario_id', userId)
+            .ilike('remetente_nome', '%Bônus de Convite%')
+            .eq('vinculado', false);
+
+        if (!bonusPendentes || bonusPendentes.length === 0) {
+            return res.status(400).json({ success: false, error: 'Não há bônus acumulados para vincular.' });
+        }
+
+        const totalParaVincular = bonusPendentes.reduce((sum, tx) => sum + toNumberSafe(tx.valor), 0);
+
+        // 2. Buscar usuário e atualizar saldo
+        const { data: user } = await supabase.from('usuarios').select('saldo_usd, telefone').eq('id', userId).single();
+        const novoSaldo = arredondar2(toNumberSafe(user.saldo_usd) + totalParaVincular);
+
+        await supabase.from('usuarios').update({ saldo_usd: novoSaldo }).eq('id', userId);
+
+        // 3. Marcar transações como vinculadas
+        const ids = bonusPendentes.map(b => b.id);
+        await supabase.from('transacoes').update({ vinculado: true }).in('id', ids);
+
+        notificarSaldoUsuario(user.telefone, { novoSaldo, mensagem: `Bônus de ${totalParaVincular.toFixed(2)} KZ vinculado ao seu saldo!` });
+        res.json({ success: true, novoSaldo });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1409,21 +1443,17 @@ app.post('/investir', async (req, res) => {
         const { data: padrinho } = await supabase.from('usuarios').select('id, saldo_usd, telefone').eq('id', user.indicado_por).single();
         
         if (padrinho) {
-            const novoSaldoPadrinho = arredondar2(toNumberSafe(padrinho.saldo_usd) + bonus);
-            
-            // Atualiza saldo do padrinho
-            await supabase.from('usuarios').update({ saldo_usd: novoSaldoPadrinho }).eq('id', padrinho.id);
-            
-            // Registra a transação de bônus
+            // Registra a transação de bônus mas NÃO atualiza o saldo do padrinho ainda
             await supabase.from('transacoes').insert({
                 remetente_id: userId, 
                 remetente_nome: 'Bônus de Convite',
                 destinatario_id: padrinho.id, 
                 destinatario_nome: 'Sistema', 
-                valor: bonus
+                valor: bonus,
+                vinculado: false
             });
-
-            notificarSaldoUsuario(padrinho.telefone, { novoSaldo: novoSaldoPadrinho, mensagem: `Recebeu ${bonus.toFixed(2)} KZ de bônus por investimento de um amigo!` });
+            
+            notificarSaldoUsuario(padrinho.telefone, { mensagem: `Acabou de acumular ${bonus.toFixed(2)} KZ em bônus de convite!` });
         }
     }
 
