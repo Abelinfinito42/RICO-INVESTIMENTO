@@ -188,6 +188,7 @@ function tipoTransacao(tx, userId) {
     if (remetenteNome.includes('deposito')) return 'deposito';
     if (remetenteNome.includes('ganho do investimento')) return 'ganho';
     if (remetenteNome.includes('cancelamento de investimento')) return 'cancelamento_investimento';
+    if (remetenteNome.includes('bônus de convite')) return 'ganho';
     if (destinatarioNome.includes('investimento') || remetenteNome === 'sistema') return 'investimento';
 
     if (Number(tx.remetente_id) === Number(userId)) return 'enviado';
@@ -784,7 +785,7 @@ app.post('/admin/levantamentos/:id/eliminar', async (req, res) => {
 // --- OUTRAS ROTAS (LOGIN/CADASTRO/BUSCA) ---
 
 app.post('/auth/cadastro', async (req, res) => {
-    const { nome, telefone, senha } = req.body;
+    const { nome, telefone, senha, indicado_por } = req.body;
     
     try {
         const existente = await buscarUsuarioPorTelefone(telefone);
@@ -792,13 +793,17 @@ app.post('/auth/cadastro', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Este número já está registado' });
         }
 
-        // Sugestão: Adicionar Hash de senha aqui com bcrypt
-        const { data, error } = await supabase.from('usuarios').insert({
+        const payload = {
             nome_completo: normalizarTexto(nome),
             telefone: assinaturaTelefone(telefone),
             senha: String(senha).trim(),
             saldo_usd: 50.00
-        }).select().single();
+        };
+
+        if (indicado_por) payload.indicado_por = parseInt(indicado_por);
+
+        // Sugestão: Adicionar Hash de senha aqui com bcrypt
+        const { data, error } = await supabase.from('usuarios').insert(payload).select().single();
 
         if (error) throw error;
         res.status(201).json({ success: true, usuario: data });
@@ -936,6 +941,28 @@ app.get('/admin/listar-usuarios', async (req, res) => {
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
+});
+
+// ROTA DE ESTATÍSTICAS DE CONVITE
+app.get('/referrals/stats/:userId', async (req, res) => {
+    const uid = req.params.userId;
+    try {
+        // Total de pessoas convidadas
+        const { count } = await supabase
+            .from('usuarios')
+            .select('*', { count: 'exact', head: true })
+            .eq('indicado_por', uid);
+
+        // Total de bônus recebidos
+        const { data: bonusData } = await supabase
+            .from('transacoes')
+            .select('valor')
+            .eq('destinatario_id', uid)
+            .ilike('remetente_nome', '%Bônus de Convite%');
+
+        const totalBonus = (bonusData || []).reduce((sum, tx) => sum + toNumberSafe(tx.valor), 0);
+        res.json({ totalInvited: count || 0, totalBonus: arredondar2(totalBonus) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/admin/usuario-mais-rico', async (req, res) => {
@@ -1357,7 +1384,7 @@ app.post('/investir', async (req, res) => {
   }
 
   try {
-    const { data: user, error: userErr } = await supabase.from('usuarios').select('saldo_usd, telefone').eq('id', userId).single();
+    const { data: user, error: userErr } = await supabase.from('usuarios').select('id, saldo_usd, telefone, indicado_por').eq('id', userId).single();
     if (userErr || !user) throw new Error('Utilizador não encontrado');
 
     if (toNumberSafe(user.saldo_usd) < valor) throw new Error('Saldo insuficiente para investir');
@@ -1375,6 +1402,30 @@ app.post('/investir', async (req, res) => {
     await supabase.from('transacoes').insert({
         remetente_id: userId, remetente_nome: 'Sistema', destinatario_id: userId, destinatario_nome: 'Investimento', valor: -valor
     });
+
+    // LÓGICA DE BÔNUS DE CONVITE (10%)
+    if (user.indicado_por) {
+        const bonus = arredondar2(valor * 0.10);
+        const { data: padrinho } = await supabase.from('usuarios').select('id, saldo_usd, telefone').eq('id', user.indicado_por).single();
+        
+        if (padrinho) {
+            const novoSaldoPadrinho = arredondar2(toNumberSafe(padrinho.saldo_usd) + bonus);
+            
+            // Atualiza saldo do padrinho
+            await supabase.from('usuarios').update({ saldo_usd: novoSaldoPadrinho }).eq('id', padrinho.id);
+            
+            // Registra a transação de bônus
+            await supabase.from('transacoes').insert({
+                remetente_id: userId, 
+                remetente_nome: 'Bônus de Convite',
+                destinatario_id: padrinho.id, 
+                destinatario_nome: 'Sistema', 
+                valor: bonus
+            });
+
+            notificarSaldoUsuario(padrinho.telefone, { novoSaldo: novoSaldoPadrinho, mensagem: `Recebeu ${bonus.toFixed(2)} KZ de bônus por investimento de um amigo!` });
+        }
+    }
 
     notificarSaldoUsuario(user.telefone, { novoSaldo, mensagem: 'Novo investimento aplicado com sucesso.' });
     io.emit('atualizar-investimentos', { userId: Number(userId), acao: 'criado' });
