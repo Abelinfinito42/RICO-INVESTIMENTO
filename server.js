@@ -833,6 +833,12 @@ app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req
         return res.json({ success: true, novoSaldo: resultado.novoSaldo, valorKz: arredondar2(valorKz), transferenciaId });
     } catch (error) {
         console.error('Erro ao registar deposito:', error);
+        if (error?.code === 'PGRST202' || /Could not find the function.*depositar_comprovativo_v2/i.test(String(error?.message || ''))) {
+            return res.status(503).json({
+                success: false,
+                error: 'A configuracao de deposito ainda nao foi aplicada no Supabase. Execute a secao depositar_comprovativo_v2 do DATABASE_UPDATE.md.'
+            });
+        }
         return res.status(503).json({ success: false, error: 'Deposito indisponivel. A operacao nao foi creditada.' });
     }
 });
