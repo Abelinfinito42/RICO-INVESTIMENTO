@@ -23,11 +23,16 @@ app.use(express.json());
 // Servir arquivos estáticos da pasta 'site'
 app.use(express.static(path.join(__dirname, 'site')));
 
+
+
+
+
+
 // CONFIGURAÇÃO SUPABASE (Credenciais do RICO INVESTIMENTO)
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mgwxtbxgxozxicmipadr.supabase.co';
+const SUPABASE_URL = 'https://mgwxtbxgxozxicmipadr.supabase.co';
 // As RPCs financeiras podem estar restritas ao service_role.
 // Configure SUPABASE_SERVICE_ROLE_KEY localmente/ no Render; nunca coloque-a no HTML.
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ';
+const SUPABASE_KEY = 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ'; // essa chave está incompleta/cortada
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // CONFIGURACOES DE DEPOSITO
