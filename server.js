@@ -1,6 +1,7 @@
 ﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const path = require('path');
 const multer = require('multer');
@@ -24,7 +25,9 @@ app.use(express.static(path.join(__dirname, 'site')));
 
 // CONFIGURAÇÃO SUPABASE (Credenciais do RICO INVESTIMENTO)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://mgwxtbxgxozxicmipadr.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ';
+// As RPCs financeiras podem estar restritas ao service_role.
+// Configure SUPABASE_SERVICE_ROLE_KEY localmente/ no Render; nunca coloque-a no HTML.
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || 'sb_publishable_cAFfrLoGx4MbG0J3IXwINw_f6NOuPkQ';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // CONFIGURACOES DE DEPOSITO
@@ -39,6 +42,25 @@ const DEPOSITO_TIMEOUT_MS = 25000;
 const SMS_API_URL = 'https://smsapi.sudomakes.com/api/enviar-sms';
 const SMS_API_KEY = process.env.SMS_API_KEY || 'hEc65zq9ipXOJeprFj4zMeW+OCiWAWohyoqSPeBqJX17ZD4Xgw8UGQiG5I5Dcs4G';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '123';
+const KASSALA_API_KEY = process.env.KASSALA_API_KEY || 'VFlkCkvV+LdsirzvfB4J6/rGl6eMItrUQYR3/HsVRb42yBJAM+p3urmKwDdsF0l3duva/fyFWvkjIumDcE/uagO53vdAj74CuXiNZOVMkwc=';
+const OTP_EXPIRA_MS = 5 * 60 * 1000;
+const OTP_REENVIO_MS = 60 * 1000;
+const OTP_MAX_TENTATIVAS = 5;
+const OTP_IP_WINDOW_MS = 10 * 60 * 1000;
+const OTP_IP_MAX_REQUESTS = 10;
+const otpStore = new Map();
+const otpIpStore = new Map();
+const sessoes = new Map();
+const levantamentosEmProcessamento = new Set();
+const SESSAO_EXPIRA_MS = 7 * 24 * 60 * 60 * 1000;
+
+const otpCleanupTimer = setInterval(() => {
+    const agora = Date.now();
+    for (const [telefone, registro] of otpStore.entries()) {
+        if (!registro || registro.expira <= agora) otpStore.delete(telefone);
+    }
+}, 60 * 1000);
+otpCleanupTimer.unref?.();
 
 function toNumberSafe(value, fallback = 0) {
     const n = Number(value);
@@ -47,6 +69,37 @@ function toNumberSafe(value, fallback = 0) {
 
 function arredondar2(value) {
     return Number(toNumberSafe(value).toFixed(2));
+}
+
+function criarSessao(userId) {
+    const token = crypto.randomBytes(32).toString('hex');
+    sessoes.set(token, { userId: Number(userId), expira: Date.now() + SESSAO_EXPIRA_MS });
+    return token;
+}
+
+function obterSessao(req) {
+    const authorization = String(req.get('authorization') || '');
+    const token = authorization.startsWith('Bearer ')
+        ? authorization.slice(7).trim()
+        : String(req.get('x-session-token') || '').trim();
+    if (!token) return null;
+    const sessao = sessoes.get(token);
+    if (!sessao) return null;
+    if (sessao.expira <= Date.now()) {
+        sessoes.delete(token);
+        return null;
+    }
+    sessao.expira = Date.now() + SESSAO_EXPIRA_MS;
+    return { ...sessao, token };
+}
+
+function exigirSessao(req, res) {
+    const sessao = obterSessao(req);
+    if (!sessao) {
+        res.status(401).json({ success: false, error: 'Sessao expirada. Faca login novamente.' });
+        return null;
+    }
+    return sessao;
 }
 
 function formatarNumeroSMS(destinatario) {
@@ -82,6 +135,68 @@ async function enviarSMS(destinatario, mensagem) {
         console.error('Erro SMS:', error.message);
         return null;
     }
+}
+
+function validarDadosCadastro({ nome, telefone, senha }) {
+    const nomeLimpo = normalizarTexto(nome);
+    const telefoneAssinatura = assinaturaTelefone(telefone);
+    const senhaLimpa = String(senha || '').trim();
+    if (nomeLimpo.split(/\s+/).filter(Boolean).length < 2) return { error: 'Insira nome e apelido.' };
+    if (!/^9\d{8}$/.test(telefoneAssinatura)) return { error: 'Numero de telemovel invalido.' };
+    if (senhaLimpa.length < 5) return { error: 'A palavra-passe deve ter pelo menos 5 caracteres.' };
+    return { nomeLimpo, telefoneAssinatura, senhaLimpa };
+}
+
+function chamarAPIKassala(caminho, payload) {
+    return new Promise((resolve, reject) => {
+        const corpo = JSON.stringify(payload);
+        const pedido = https.request({
+            hostname: 'smsapi.sudomakes.com',
+            path: caminho,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(corpo) },
+            timeout: 15000
+        }, (resposta) => {
+            let texto = '';
+            resposta.setEncoding('utf8');
+            resposta.on('data', (parte) => { texto += parte; });
+            resposta.on('end', () => {
+                try { resolve(texto ? JSON.parse(texto) : {}); }
+                catch { resolve({ status: -1, log: texto }); }
+            });
+        });
+        pedido.on('timeout', () => pedido.destroy(new Error('Tempo limite da API OTP excedido.')));
+        pedido.on('error', reject);
+        pedido.write(corpo);
+        pedido.end();
+    });
+}
+
+function limitarPedidosOTP(req) {
+    const ip = req.ip || req.socket.remoteAddress || 'desconhecido';
+    const agora = Date.now();
+    const registro = otpIpStore.get(ip);
+    if (!registro || agora - registro.inicio >= OTP_IP_WINDOW_MS) {
+        otpIpStore.set(ip, { inicio: agora, total: 1 });
+        return null;
+    }
+    if (registro.total >= OTP_IP_MAX_REQUESTS) return 'Muitos pedidos de SMS. Tente novamente mais tarde.';
+    registro.total += 1;
+    return null;
+}
+
+async function enviarOTPCadastro(destinatario) {
+    if (!KASSALA_API_KEY) throw new Error('Chave da API OTP nao configurada.');
+    const telefone = assinaturaTelefone(destinatario);
+    const resposta = await chamarAPIKassala('/api/enviar-otp', {
+        api_key: KASSALA_API_KEY,
+        destinatario: telefone
+    });
+    console.log('[OTP] envio para', telefone, 'status', resposta.status);
+    if (Number(resposta.status) !== 1 || !resposta.otp) {
+        throw new Error(String(resposta.log || resposta.erro || resposta.mensagem || 'Falha ao enviar codigo OTP.'));
+    }
+    return String(resposta.otp);
 }
 const depositoUpload = multer({
     storage: multer.memoryStorage(),
@@ -280,62 +395,6 @@ function extrairValorComprovativo(data, respostaTexto) {
     return numero;
 }
 
-function extrairDataComprovativo(data, respostaTexto) {
-    const chavesData = ['DATA', 'DATE', 'DATA_TRANSACAO', 'DATA_EMISSAO', 'DATA_VALOR', 'DATA_OPERACAO', 'DATA_HORA', 'DATA - HORA'];
-    let dataTexto = String(obterValorChave(data, chavesData) || '');
-
-    // Unificamos o texto para busca (JSON + Texto Bruto)
-    const textoParaBusca = (dataTexto + " " + (respostaTexto || ""));
-
-    // 1. Procura Formato ISO: 2026-04-12 (Padrão Multicaixa Express)
-    const matchISO = textoParaBusca.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-    if (matchISO) {
-        const ano = parseInt(matchISO[1]);
-        const mes = parseInt(matchISO[2]) - 1;
-        const dia = parseInt(matchISO[3]);
-        return new Date(ano, mes, dia);
-    }
-
-    // 2. Procura Formato PT: 12/04/2026
-    const matchLong = textoParaBusca.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
-    if (matchLong) {
-        const dia = parseInt(matchLong[1]);
-        const mes = parseInt(matchLong[2]) - 1;
-        const ano = parseInt(matchLong[3]);
-        return new Date(ano, mes, dia);
-    }
-
-    // 3. Procura Formato Curto: 12/04/26
-    const matchShort = textoParaBusca.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b/);
-    if (matchShort) {
-        const dia = parseInt(matchShort[1]);
-        const mes = parseInt(matchShort[2]) - 1;
-        let ano = parseInt(matchShort[3]);
-        ano = ano < 50 ? 2000 + ano : 1900 + ano;
-        return new Date(ano, mes, dia);
-    }
-
-    if (dataTexto && dataTexto.length > 5) {
-        const d = new Date(dataTexto);
-        if (!isNaN(d.getTime())) return d;
-    }
-
-    return null;
-}
-
-function isDataHojeOuFuturo(dataComprovativo) {
-    if (!dataComprovativo) return false;
-
-    // Data atual em Angola
-    const hoje = new Date(new Date().toLocaleString("en-US", {timeZone: "Africa/Luanda"}));
-    hoje.setHours(0, 0, 0, 0);
-
-    const dataComp = new Date(dataComprovativo);
-    dataComp.setHours(0, 0, 0, 0);
-
-    return dataComp.getTime() >= hoje.getTime();
-}
-
 function validarDestinoComprovativo(respostaTexto) {
     if (!respostaTexto) return { ok: false, tipo: null, valor: null };
     const textoBruto = String(respostaTexto);
@@ -355,7 +414,9 @@ function validarDestinoComprovativo(respostaTexto) {
 
 // --- DEPOSITOS (COMPROVATIVOS) ---
 app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req, res) => {
-    const userIdNum = parseInt(req.body.userId);
+    const sessao = exigirSessao(req, res);
+    if (!sessao) return;
+    const userIdNum = sessao.userId;
 
     if (!Number.isInteger(userIdNum) || userIdNum <= 0) {
         return res.status(400).json({ success: false, error: 'Utilizador invalido.' });
@@ -432,15 +493,6 @@ app.post('/depositos/validar', depositoUpload.single('comprovativo'), async (req
     const valorKz = extrairValorComprovativo(data, respostaTexto);
     if (!Number.isFinite(valorKz) || valorKz <= 0) {
         return res.status(400).json({ success: false, error: 'Valor invalido no comprovativo.' });
-    }
-
-    const dataTransacao = extrairDataComprovativo(data, respostaTexto);
-    if (!dataTransacao) {
-        return res.status(400).json({ success: false, error: 'Nao foi possivel identificar a data da transferencia.' });
-    }
-
-    if (!isDataHojeOuFuturo(dataTransacao)) {
-        return res.status(400).json({ success: false, error: 'Comprovativo rejeitado: A transferencia deve ser do dia de hoje.' });
     }
 
     const valorUsd = valorKz;
@@ -559,12 +611,16 @@ app.post('/transferir', async (req, res) => {
 // --- LEVANTAMENTOS (SAQUES) ---
 
 app.post('/levantamentos/solicitar', async (req, res) => {
-    const { userId, valor, metodo, unitelTelefone, iban, beneficiarioNome } = req.body;
-    const valorNumerico = parseFloat(valor);
+    const sessao = exigirSessao(req, res);
+    if (!sessao) return;
+
+    const { valor, metodo, unitelTelefone, iban, beneficiarioNome } = req.body;
+    const userId = sessao.userId;
+    const valorNumerico = Number(String(valor ?? '').trim().replace(',', '.'));
     const metodoNormalizado = String(metodo || '').toLowerCase();
     const VALOR_MINIMO_LEVANTAMENTO = 50;
 
-    if (!userId || !valorNumerico || valorNumerico <= 0 || !metodoNormalizado) {
+    if (!Number.isInteger(userId) || userId <= 0 || !Number.isFinite(valorNumerico) || valorNumerico <= 0 || !metodoNormalizado) {
         return res.status(400).json({ success: false, error: 'Dados de levantamento inválidos.' });
     }
 
@@ -590,6 +646,13 @@ app.post('/levantamentos/solicitar', async (req, res) => {
         if (beneficiarioNormalizado.length < 3) return res.status(400).json({ success: false, error: 'Nome inválido' });
     }
 
+    const requestId = String(req.get('x-request-id') || '').trim();
+    const chaveProcessamento = `${userId}:${requestId || 'sem-request-id'}`;
+    if (levantamentosEmProcessamento.has(chaveProcessamento)) {
+        return res.status(409).json({ success: false, error: 'Este levantamento já está a ser processado.' });
+    }
+    levantamentosEmProcessamento.add(chaveProcessamento);
+
     try {
         const { data: usuario, error: userErr } = await supabase.from('usuarios').select('*').eq('id', userId).single();
         if (userErr || !usuario) throw new Error('Usuário não encontrado.');
@@ -607,9 +670,10 @@ app.post('/levantamentos/solicitar', async (req, res) => {
         });
 
         if (rpcErr) throw rpcErr;
-        if (!rpcData.success) throw new Error(rpcData.error);
+        const resultado = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+        if (!resultado?.success) throw new Error(resultado?.error || 'Falha ao solicitar levantamento.');
 
-        const novoSaldo = rpcData.novoSaldo;
+        const novoSaldo = resultado.novoSaldo;
 
         notificarSaldoUsuario(usuario.telefone, {
             novoSaldo,
@@ -618,13 +682,20 @@ app.post('/levantamentos/solicitar', async (req, res) => {
 
         io.emit('atualizar-levantamentos', {
             userId: Number(userId),
-            levantamentoId: rpcData.levantamentoId,
+            levantamentoId: resultado.levantamentoId,
             status: 'pendente'
         });
 
         res.json({ success: true, novoSaldo });
     } catch (e) {
-        res.status(400).json({ success: false, error: e.message });
+        const mensagem = String(e?.message || 'Falha ao solicitar levantamento.');
+        const indisponivel = /solicitar_saque_v2|Could not find the function|PGRST202/i.test(mensagem);
+        res.status(indisponivel ? 503 : 400).json({
+            success: false,
+            error: indisponivel ? 'A função de levantamento não está disponível no Supabase. Execute a migração DATABASE_UPDATE.md.' : mensagem
+        });
+    } finally {
+        levantamentosEmProcessamento.delete(chaveProcessamento);
     }
 });
 
@@ -784,35 +855,100 @@ app.post('/admin/levantamentos/:id/eliminar', async (req, res) => {
     }
 });
 
-// --- OUTRAS ROTAS (LOGIN/CADASTRO/BUSCA) ---
-
-app.post('/auth/cadastro', async (req, res) => {
+// --- OTP DE CADASTRO ---
+async function solicitarOTPCadastro(req, res) {
     const { nome, telefone, senha, indicado_por } = req.body;
-    
+    const validacao = validarDadosCadastro({ nome, telefone, senha });
+    if (validacao.error) return res.status(400).json({ success: false, error: validacao.error });
+    const { nomeLimpo, telefoneAssinatura, senhaLimpa } = validacao;
+
     try {
-        const existente = await buscarUsuarioPorTelefone(telefone);
+        const existente = await buscarUsuarioPorTelefone(telefoneAssinatura, 'id');
+        if (existente) return res.status(400).json({ success: false, error: 'Este numero ja esta registado.' });
+
+        const erroLimiteIP = limitarPedidosOTP(req);
+        if (erroLimiteIP) return res.status(429).json({ success: false, error: erroLimiteIP });
+
+        const anterior = otpStore.get(telefoneAssinatura);
+        if (anterior) {
+            if (anterior.expira <= Date.now()) {
+                otpStore.delete(telefoneAssinatura);
+            } else if (Date.now() - anterior.enviadoEm < OTP_REENVIO_MS) {
+                const segundos = Math.ceil((OTP_REENVIO_MS - (Date.now() - anterior.enviadoEm)) / 1000);
+                return res.status(429).json({ success: false, error: `Aguarde ${segundos}s para reenviar o codigo.` });
+            }
+        }
+
+        const codigo = await enviarOTPCadastro(telefoneAssinatura);
+        otpStore.set(telefoneAssinatura, {
+            codigo,
+            nome: nomeLimpo,
+            senha: senhaLimpa,
+            indicado_por: indicado_por || null,
+            expira: Date.now() + OTP_EXPIRA_MS,
+            enviadoEm: Date.now(),
+            tentativas: 0
+        });
+        res.json({ success: true, telefone: telefoneAssinatura, expiraEmSegundos: Math.floor(OTP_EXPIRA_MS / 1000), mensagem: 'Codigo de confirmacao enviado por SMS.' });
+    } catch (error) {
+        console.error('Erro ao solicitar OTP:', error);
+        res.status(500).json({ success: false, error: error.message || 'Erro ao enviar o codigo.' });
+    }
+}
+
+app.post('/auth/solicitar-otp-cadastro', solicitarOTPCadastro);
+app.post('/auth/cadastro', solicitarOTPCadastro);
+
+app.post('/auth/confirmar-cadastro', async (req, res) => {
+    const telefoneAssinatura = assinaturaTelefone(req.body.telefone);
+    const codigo = String(req.body.codigo || '').replace(/\D/g, '');
+    if (!/^9\d{8}$/.test(telefoneAssinatura) || !/^\d{4,8}$/.test(codigo)) {
+        return res.status(400).json({ success: false, error: 'Telefone ou codigo invalido.' });
+    }
+
+    try {
+        const pendente = otpStore.get(telefoneAssinatura);
+        if (!pendente) return res.status(400).json({ success: false, error: 'Solicite um novo codigo de confirmacao.' });
+        if (pendente.expira <= Date.now()) {
+            otpStore.delete(telefoneAssinatura);
+            return res.status(400).json({ success: false, error: 'Codigo expirado. Solicite um novo codigo.' });
+        }
+        if ((pendente.tentativas || 0) >= OTP_MAX_TENTATIVAS) {
+            otpStore.delete(telefoneAssinatura);
+            return res.status(429).json({ success: false, error: 'Limite de tentativas excedido.' });
+        }
+        if (String(pendente.codigo) !== codigo) {
+            pendente.tentativas = (pendente.tentativas || 0) + 1;
+            if (pendente.tentativas >= OTP_MAX_TENTATIVAS) otpStore.delete(telefoneAssinatura);
+            return res.status(401).json({ success: false, error: 'Codigo de confirmacao incorreto.' });
+        }
+
+        const existente = await buscarUsuarioPorTelefone(telefoneAssinatura, 'id');
         if (existente) {
-            return res.status(400).json({ success: false, error: 'Este número já está registado' });
+            otpStore.delete(telefoneAssinatura);
+            return res.status(400).json({ success: false, error: 'Este numero ja esta registado.' });
         }
 
         const payload = {
-            nome_completo: normalizarTexto(nome),
-            telefone: assinaturaTelefone(telefone),
-            senha: String(senha).trim(),
+            nome_completo: pendente.nome,
+            telefone: telefoneAssinatura,
+            senha: pendente.senha,
             saldo_usd: 50.00
         };
+        const indicadoPorNum = parseInt(pendente.indicado_por);
+        if (Number.isInteger(indicadoPorNum) && indicadoPorNum > 0) payload.indicado_por = indicadoPorNum;
 
-        if (indicado_por) payload.indicado_por = parseInt(indicado_por);
-
-        // Sugestão: Adicionar Hash de senha aqui com bcrypt
-        const { data, error } = await supabase.from('usuarios').insert(payload).select().single();
-
+        const { data, error } = await supabase.from('usuarios').insert(payload).select('id, nome_completo, telefone, saldo_usd').single();
         if (error) throw error;
+        otpStore.delete(telefoneAssinatura);
         res.status(201).json({ success: true, usuario: data });
-    } catch (err) {
-        res.status(500).json({ success: false, error: 'Erro ao processar o cadastro.' });
+    } catch (error) {
+        console.error('Erro ao confirmar cadastro:', error);
+        res.status(500).json({ success: false, error: 'Erro ao criar a conta.' });
     }
 });
+
+// --- OUTRAS ROTAS (LOGIN/BUSCA) ---
 
 app.post('/auth/login', async (req, res) => {
     const { telefone, senha } = req.body;
@@ -824,7 +960,9 @@ app.post('/auth/login', async (req, res) => {
         if (!user) return res.status(401).json({ error: 'Dados incorretos' });
         if (user.bloqueado) return res.status(403).json({ error: 'Usuário bloqueado pelo suporte. Contacte o suporte +55 926240472' });
 
-        res.json({ success: true, usuario: user });
+        const { senha: _senha, bloqueado: _bloqueado, ...usuarioSeguro } = user;
+        const sessionToken = criarSessao(user.id);
+        res.json({ success: true, usuario: { ...usuarioSeguro, sessionToken } });
     } catch (err) {
         console.error("ERRO NO LOGIN:", err);
         if (err.message && err.message.includes('column "bloqueado" does not exist')) {
